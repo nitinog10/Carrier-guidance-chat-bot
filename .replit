@@ -1,0 +1,27 @@
+run = "node server.js"
+
+[deployment]
+deploymentTarget = "gce"
+run = ["sh", "-c", "node server.js"]
+
+[nix]
+channel = "stable-24_05"
+
+[workflows]
+runButton = "Run"
+
+[[workflows.workflow]]
+name = "Run"
+author = 37324147
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node server.js"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+# [nix]
+# channel = "stable-21_11"
