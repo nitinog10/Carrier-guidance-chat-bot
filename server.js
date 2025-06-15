@@ -1,12 +1,14 @@
 const express = require('express');
 const app = express();
 const path = require('path');
-const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require('axios');
 const messages = []
-const openai = new OpenAI({
-  apiKey: "Your_open_ai api key", 
-});
+
+// Initialize GoogleGenerativeAI client
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'YOUR_GEMINI_API_KEY';
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
 // Age categories configuration
 const ageCategories = {
   child: { min: 5, max: 12, level: 'Beginner' },
@@ -47,79 +49,68 @@ async function getYouTubeTutorials(query, maxResults = 3) {
     return [];
   }
 }
-async function main(input, userAge, educationLevel = 'college1') {
-  const levelInfo = educationLevels[educationLevel] || educationLevels['college1'];
-  messages.push({ 
-    role: 'user', 
-    content: `As a ${levelInfo.label} student, interested in ${input}, please recommend relevant courses and resources focused on: ${levelInfo.focus}` 
-  });
 
-  const completion = await openai.chat.completions.create({
-    messages: messages,
-    model: 'gpt-3.5-turbo',
-  });
-
-  const tutorials = await getYouTubeTutorials(input);
-
-  return {
-    message: completion.choices[0]?.message?.content,
-    educationLevel: levelInfo.label,
-    focusArea: levelInfo.focus,
-    tutorials
-  };
-}
-async function getYouTubeTutorials(query, maxResults = 3) {
-  try {
-    const response = await axios.get("https://www.googleapis.com/youtube/v3/search", {
-      params: {
-        part: 'snippet',
-        q: query,
-        type: 'video',
-        maxResults: maxResults,
-        key: YOUTUBE_API_KEY
-      }
-    });
-
-    return response.data.items.map(item => ({
-      title: item.snippet.title,
-      description: item.snippet.description,
-      channelTitle: item.snippet.channelTitle,
-      thumbnailUrl: item.snippet.thumbnails.medium.url,
-      videoId: item.id.videoId,
-      url: `https://www.youtube.com/watch?v=${item.id.videoId}`
-    }));
-  } catch (error) {
-    console.error('YouTube API Error:', error);
-    return [];
-  }
-}
-
-async function main(input, userAge) {
+async function main(input, userAge, educationLevel = 'college1') { // Added educationLevel back
   // Determine age category
   const ageCategory = Object.entries(ageCategories).find(([_, range]) => 
     userAge >= range.min && userAge <= range.max
   )?.[0] || 'adult';
 
-  // Add age-specific context to the message
-  messages.push({ 
-    role: 'user', 
-    content: `As a ${ageCategory} learner (age ${userAge}), ${input}. Please provide age-appropriate guidance.` 
-  });
+  // Check if input starts with "What if" (case-insensitive) for prompt formulation
+  if (input.toLowerCase().startsWith('what if')) {
+    messages.push({
+      role: 'user',
+      content: `For the scenario "${input}", generate 2-3 alternate timelines. Each timeline should explore the consequences of the changed event, presenting a branched storyline with clear logic and engaging storytelling. Consider counterfactual modeling principles.`
+    });
+  } else {
+    // Add age-specific context to the message for other inputs
+    messages.push({
+      role: 'user',
+      content: `As a ${ageCategory} learner (age ${userAge}), focused on ${educationLevels[educationLevel]?.label || educationLevels['college1'].label} level studies, seeking guidance on "${input}". Please provide age-appropriate and education-level specific guidance.`
+    });
+  }
 
-  const completion = await openai.chat.completions.create({
-    messages: messages,
-    model: 'gpt-3.5-turbo',
-  });
+  // For text-only input, use the gemini-pro model
+  const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+  const prompt = messages[0].content; // Use the first (and only) message content as the prompt
+  messages.length = 0; // Clear the array for the next call
 
-  // Get related YouTube tutorials
-  const tutorials = await getYouTubeTutorials(input);
+  const result = await model.generateContent(prompt);
+  const response = await result.response;
+  const text = response.text();
 
-  return {
-    message: completion.choices[0]?.message?.content,
-    ageCategory,
-    difficultyLevel: ageCategories[ageCategory].level,
-    tutorials
-  };
+  let youtubeQuery;
+  const isWhatIfScenario = input.toLowerCase().startsWith('what if');
+
+  if (isWhatIfScenario) {
+    let extractedSubject = input.substring(8).trim(); // Remove "What if " and trim
+    if (extractedSubject.endsWith('?')) {
+      extractedSubject = extractedSubject.slice(0, -1); // Remove trailing question mark
+    }
+    youtubeQuery = extractedSubject;
+  } else {
+    youtubeQuery = input;
+  }
+
+  const tutorials = await getYouTubeTutorials(youtubeQuery);
+
+  if (isWhatIfScenario) {
+    return {
+      scenarioType: 'whatIf',
+      originalQuery: input,
+      storylines: text, // This is the response from Gemini
+      relatedVideos: tutorials
+    };
+  } else {
+    return {
+      message: text, // This is the response from Gemini
+      ageCategory,
+      difficultyLevel: ageCategories[ageCategory].level,
+      educationLevel: educationLevels[educationLevel]?.label || educationLevels['college1'].label,
+      focusArea: educationLevels[educationLevel]?.focus || educationLevels['college1'].focus,
+      tutorials
+    };
+  }
 }
 
 app.use(express.static('templates'));
@@ -132,7 +123,8 @@ app.get('/', (req, res) => {
 
 app.post('/api', async function (req, res, next) {
   try {
-    const result = await main(req.body.input, req.body.age || 25)
+    // Pass educationLevel from request body, default to 'college1'
+    const result = await main(req.body.input, req.body.age || 25, req.body.educationLevel || 'college1');
     res.json({
       success: true, 
       data: result
@@ -149,4 +141,3 @@ const port = 3000;
 app.listen(port, '0.0.0.0', () => {
     console.log(`Server running at http://0.0.0.0:${port}`);
 });
-const result = await main(req.body.input, req.body.age || 25, req.body.educationLevel || 'college1');
